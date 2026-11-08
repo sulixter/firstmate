@@ -1236,8 +1236,11 @@ fm_pr_gitea_api() {  # <origin> <GET|POST> <api-path> <body-out> [request-json-f
     /api/v1/repos/*) ;;
     *) return 1 ;;
   esac
+  # A segment name read back from the server, such as a base branch, is part of
+  # some paths, so dot segments and empty segments are refused here rather than
+  # left for an HTTP client to normalize into another endpoint.
   case "$api_path" in
-    *[!A-Za-z0-9._/?\&=-]*) return 1 ;;
+    *[!A-Za-z0-9._/?\&=-]*|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
   esac
   login=$(fm_pr_gitea_login "$origin") || return 1
   headers=$(mktemp "${TMPDIR:-/tmp}/fm-pr-gitea-headers.XXXXXX") || return 1

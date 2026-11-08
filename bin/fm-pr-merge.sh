@@ -1638,7 +1638,7 @@ gitea_confirm_merged() {
   printf 'verified: %s is merged\n' "$URL"
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Record before any forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0

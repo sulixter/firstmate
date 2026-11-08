@@ -2248,6 +2248,16 @@ EOF
   case "$out" in *"requires tea on PATH"*) ;; *) fail "Gitea arming with tea absent did not name tea: $out" ;; esac
   [ ! -e "$state/task-t.check.sh" ] || fail "refused Gitea arming left a poll armed"
 
+  # A path that an HTTP client could normalize into another endpoint is refused
+  # before tea runs.
+  : > "$dir/tea/tea.log"
+  for traversal in /api/v1/repos/owner/repo/branches/../../../admin /api/v1/repos/owner/repo/branches/./x \
+    /api/v1/repos/owner//repo /api/v1/repos/owner/repo/branches/.. /api/v1/users/x; do
+    ! PATH="$dir/fakebin:$BASE_PATH" fm_pr_gitea_api "$origin" GET "$traversal" "$dir/traversal.out" \
+      || fail "the Gitea API helper accepted $traversal"
+  done
+  [ ! -s "$dir/tea/tea.log" ] || fail "the Gitea API helper ran tea for a refused path"
+
   pass "Gitea pull requests are followed through the origin's tea login and never wake falsely"
 }
 
