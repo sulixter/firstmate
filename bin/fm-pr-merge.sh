@@ -118,9 +118,9 @@
 # head_commit_id, so a push that lands between the read and the merge fails the
 # merge with a conflict instead of landing commits nothing verified; branch
 # deletion is always sent false. The merge style is the caller's --merge,
-# --squash, --rebase, --rebase-merge, --fast-forward-only, or --method <style>,
-# else the repository's own default_merge_style, so no squash is imposed where
-# the project merges otherwise; manually-merged, which only marks a pull request
+# --squash, --rebase, --rebase-merge, or --fast-forward-only, else the
+# repository's own default_merge_style, so no squash is imposed where the
+# project merges otherwise; manually-merged, which only marks a pull request
 # merged, is never sent. No other extra forge argument is accepted for Gitea,
 # with or without --attended-override, and --allow-red and --allow-missing do
 # not apply. Only a 2xx status ends the request as accepted, because tea exits
@@ -391,44 +391,23 @@ reject_protected_forge_args "$@" || exit 1
 # style, named at most once. Everything else is refused rather than passed on.
 GITEA_MERGE_STYLE=
 if [ "$PROVIDER" = gitea ]; then
-  gitea_style_pending=false
   gitea_style_count=0
   for arg in "$@"; do
-    if [ "$gitea_style_pending" = true ]; then
-      GITEA_MERGE_STYLE=$arg
-      gitea_style_pending=false
-      continue
-    fi
     case "$arg" in
       --merge|--squash|--rebase|--rebase-merge|--fast-forward-only)
         GITEA_MERGE_STYLE=${arg#--}
         gitea_style_count=$((gitea_style_count + 1))
         ;;
-      --method)
-        gitea_style_pending=true
-        gitea_style_count=$((gitea_style_count + 1))
-        ;;
-      --method=*)
-        GITEA_MERGE_STYLE=${arg#--method=}
-        gitea_style_count=$((gitea_style_count + 1))
-        ;;
       *)
-        echo "error: a Gitea merge accepts only a merge style (--merge, --squash, --rebase, --rebase-merge, --fast-forward-only, or --method <style>) as an extra argument" >&2
+        echo "error: a Gitea merge accepts only a merge style (--merge, --squash, --rebase, --rebase-merge, or --fast-forward-only) as an extra argument" >&2
         exit 2
         ;;
     esac
   done
-  if [ "$gitea_style_pending" = true ] || [ "$gitea_style_count" -gt 1 ]; then
+  if [ "$gitea_style_count" -gt 1 ]; then
     echo "error: a Gitea merge takes at most one merge style" >&2
     exit 2
   fi
-  case "$GITEA_MERGE_STYLE" in
-    ''|merge|squash|rebase|rebase-merge|fast-forward-only) ;;
-    *)
-      echo "error: unsupported Gitea merge style; expected merge, squash, rebase, rebase-merge, or fast-forward-only" >&2
-      exit 2
-      ;;
-  esac
 fi
 
 FM_PR_GITHUB_AUTO_REQUESTED=false

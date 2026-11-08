@@ -2636,7 +2636,9 @@ test_gitea_extra_arguments_are_limited_to_a_merge_style() {
     assert_grep "$expect" "$case_dir/stderr" "gitea-args-$name: the refusal did not explain itself"
     ! grep -q '^api ' "$case_dir/tea/tea.log" || fail "gitea-args-$name: Gitea was contacted"
   done <<'CASES'
-manual|-- --method manually-merged|unsupported Gitea merge style
+manual|-- --manually-merged|accepts only a merge style
+method|-- --method merge|accepts only a merge style
+method-equals|-- --method=squash|accepts only a merge style
 two-styles|-- --merge --squash|at most one merge style
 delete-branch|--attended-override -- --delete-branch|accepts only a merge style
 auto|--attended-override -- --auto|accepts only a merge style
