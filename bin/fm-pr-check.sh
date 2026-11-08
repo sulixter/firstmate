@@ -6,10 +6,13 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
+# A GitHub pull request URL, a GitLab merge request URL, a Gerrit change URL,
+# and a Gitea pull request URL are all accepted, including a merge request,
+# change, or pull request on a self-hosted instance.
+# A Gitea pull request is armed only when tea and jq are on PATH and exactly one
+# tea login is configured for its origin (bin/fm-pr-lib.sh fm_pr_gitea_login),
+# because that login is the only way its poll can read it.
+# A GitHub or Gitea pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
 # Mark the pull request ready for review, then arm again; a lane that keeps a
@@ -98,6 +101,21 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
+if [ "$PROVIDER" = gitea ]; then
+  if ! command -v tea >/dev/null 2>&1; then
+    echo "error: watching a Gitea pull request requires tea on PATH" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Gitea pull request requires jq on PATH" >&2
+    exit 1
+  fi
+  if ! fm_pr_gitea_login "$HOST" >/dev/null; then
+    echo "error: watching a Gitea pull request requires exactly one tea login whose URL is $HOST" >&2
+    exit 1
+  fi
+fi
+
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -108,12 +126,21 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
   fi
 fi
 
+if [ "$PROVIDER" = gitea ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+  && GITEA_DRAFT_JSON=$(fm_pr_gitea_read_pull "$HOST" "$PROJECT_PATH" "$NUMBER") \
+  && [ "$(printf '%s' "$GITEA_DRAFT_JSON" | jq -r 'if (.draft | type) == "boolean" then (.draft | tostring) else "" end' 2>/dev/null)" = true ]; then
+  echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+  exit 1
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
+# GitLab task records no pr_head. A Gitea task records none either, because
+# neither consumer below has a Gitea path that could use it, and neither does a
+# Gerrit task: a Gerrit
 # revision names one patch set, every amend or rebase is a new patch set, and
 # bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
 # recorded revision would silently become the reviewed content. Both consumers
@@ -122,7 +149,7 @@ fi
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
+# bin/fm-pr-merge.sh reads a GitLab or Gitea head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=

@@ -4,10 +4,11 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, and an
-# arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
+# "path" is the full project path, which is owner/repository on GitHub and
+# Gitea, an arbitrarily nested group/subgroup/project namespace on GitLab, and
+# an arbitrarily nested project name on Gerrit, where "number" is the change
+# number. On Gitea "host" is the whole origin, scheme and any port included
+# (fm_pr_url_parse owns why). A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
 # instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
 # so the host is part of that identity rather than a constant. Every consumer re-derives the identity
@@ -188,16 +189,56 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# A Gitea owner is a user or organization name: letters, digits, ".", "_", and
+# "-", starting and ending with a letter or digit, with no two of those
+# separators adjacent. A repository name may use the same characters, but a
+# leading hyphen is refused because it would read as an option to any CLI that
+# takes the name, and ".git" and ".wiki" suffixes are refused because Gitea
+# strips the first and serves the second as the wiki rather than the
+# repository, so neither is a canonical repository spelling.
+fm_pr_gitea_path_valid() {
+  local path=${1-} owner repo
+  local LC_ALL=C
+  case "$path" in
+    */*/*|/*|*/) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  owner=${path%%/*}
+  repo=${path#*/}
+  [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 40 ] || return 1
+  case "$owner" in
+    [!A-Za-z0-9]*|*[!A-Za-z0-9]|*[!A-Za-z0-9._-]*|*[._-][._-]*) return 1 ;;
+  esac
+  [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || return 1
+  case "$repo" in
+    .|..|-*|*.git|*.wiki|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab and Gerrit each get
-# their own namespace rules rather than a loosened GitHub rule.
+# username and repository rules are unchanged, and GitLab, Gerrit, and Gitea
+# each get their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
 # URL leaves them empty, and those paths address the project by FM_PR_HOST and
 # FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
 # host.
+#
+# A Gitea pull request URL is <scheme>://<host>[:<port>]/<owner>/<repo>/pulls/<n>.
+# Gitea is commonly self-hosted on a private network behind plain http and a
+# non-default port, so this provider alone accepts http and a port; the GitHub,
+# GitLab, and Gerrit patterns are unchanged and still require https with no
+# port. Because the scheme and port then name a different server, FM_PR_HOST
+# for gitea is the whole origin, <scheme>://<host>[:<port>], rather than a bare
+# host, so the stored identity can never conflate two servers. A default port
+# spelled out (:80 on http, :443 on https) is refused as a non-canonical second
+# spelling of the same pull request. Accepting the URL is not trust in the
+# server: every Gitea read and merge goes only through a tea login whose
+# configured URL is exactly that origin (fm_pr_gitea_login), so a URL naming
+# any other server reaches nothing.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -238,6 +279,30 @@ fm_pr_url_parse() {
     FM_PR_HOST=$host
     FM_PR_PATH=$path
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # The owner and repository classes exclude "/", so this pattern names exactly
+  # two path segments and cannot overlap the GitLab or Gerrit forms, whose
+  # route separators sit at other depths.
+  pattern='^(https?)://([a-z0-9.-]{1,253})(:([1-9][0-9]{0,4}))?/([A-Za-z0-9._-]{1,40})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    local scheme=${BASH_REMATCH[1]} port=${BASH_REMATCH[4]} owner=${BASH_REMATCH[5]} repo=${BASH_REMATCH[6]} number=${BASH_REMATCH[7]}
+    host=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    if [ -n "$port" ]; then
+      [ "$port" -le 65535 ] || return 1
+      [ "$scheme:$port" != http:80 ] && [ "$scheme:$port" != https:443 ] || return 1
+    fi
+    fm_pr_gitea_path_valid "$owner/$repo" || return 1
+    FM_PR_PROVIDER=gitea
+    FM_PR_URL=$raw
+    FM_PR_HOST="$scheme://$host${port:+:$port}"
+    FM_PR_PATH="$owner/$repo"
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=$owner
+    # shellcheck disable=SC2034
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # A Gerrit change URL is https://<host>/c/<project>/+/<number>. "+" is outside
@@ -1120,6 +1185,175 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
   # shellcheck disable=SC2034
   FM_PR_RECORD_REVISION=$revision
+}
+
+# Gitea is read and merged only through tea, the Gitea CLI, and only through a
+# tea login whose configured URL is exactly the pull request's origin. The login
+# is resolved by that match on every call rather than recorded, so no login name
+# or credential is ever stored in task state, and a pull request URL naming a
+# server with no such login reaches nothing: zero matches and an ambiguous
+# several both refuse. tea holds the token; firstmate never reads it.
+# Prints the one matching login name.
+fm_pr_gitea_login() {  # <origin>
+  local origin=${1-} json name
+  command -v tea >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -n "$origin" ] || return 1
+  json=$(cd / && tea logins list --output json 2>/dev/null) || return 1
+  name=$(printf '%s' "$json" | jq -r --arg origin "$origin" '
+    if type != "array" then error("invalid logins") else . end
+    | [ .[]
+        | select(type == "object" and (.url | type) == "string" and (.name | type) == "string")
+        | select((.url | sub("/+$"; "")) == $origin)
+        | .name ]
+    | if length == 1 and (.[0] | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+      then .[0]
+      else error("no unique login")
+      end' 2>/dev/null) || return 1
+  [ -n "$name" ] || return 1
+  printf '%s\n' "$name"
+}
+
+# One authenticated Gitea API request through the matched tea login.
+# tea api exits zero on an HTTP error status and prints the error body as if it
+# were the answer, so the status is read from the one HTTP status line that
+# --include writes to stderr, and only a 2xx status succeeds. The response body
+# is written to <body-out>. Sets FM_PR_GITEA_STATUS to the HTTP status (empty
+# when none was read) and FM_PR_GITEA_TOTAL to the X-Total-Count header, which
+# is the only whole-list count Gitea reports for a paginated list.
+# Only GET and POST against /api/v1/repos/ are accepted, so this cannot be used
+# to address any other endpoint family; tea runs from / so no repository
+# context in the caller's directory can redirect it.
+FM_PR_GITEA_STATUS=
+FM_PR_GITEA_TOTAL=
+fm_pr_gitea_api() {  # <origin> <GET|POST> <api-path> <body-out> [request-json-file]
+  local origin=$1 method=$2 api_path=$3 body_out=$4 request=${5-} login headers status total
+  local -a args
+  FM_PR_GITEA_STATUS=
+  FM_PR_GITEA_TOTAL=
+  case "$method" in GET|POST) ;; *) return 1 ;; esac
+  case "$api_path" in
+    /api/v1/repos/*) ;;
+    *) return 1 ;;
+  esac
+  case "$api_path" in
+    *[!A-Za-z0-9._/?\&=-]*) return 1 ;;
+  esac
+  login=$(fm_pr_gitea_login "$origin") || return 1
+  headers=$(mktemp "${TMPDIR:-/tmp}/fm-pr-gitea-headers.XXXXXX") || return 1
+  args=(api --login "$login" --include --method "$method")
+  [ -z "$request" ] || args+=(--data "@$request")
+  args+=("$api_path")
+  if ! (cd / && tea "${args[@]}") >"$body_out" 2>"$headers"; then
+    rm -f -- "$headers"
+    return 1
+  fi
+  status=$(tr -d '\r' < "$headers" | awk '
+    /^HTTP\/[0-9.]+ [0-9][0-9][0-9]( |$)/ { count++; code=$2 }
+    END { if (count == 1) print code; else exit 1 }') || { rm -f -- "$headers"; return 1; }
+  total=$(tr -d '\r' < "$headers" | awk '
+    tolower($1) == "x-total-count:" { count++; value=$2 }
+    END { if (count == 1 && value ~ /^[0-9]+$/) print value }')
+  rm -f -- "$headers"
+  FM_PR_GITEA_STATUS=$status
+  # shellcheck disable=SC2034  # Read by callers of this helper.
+  FM_PR_GITEA_TOTAL=$total
+  case "$status" in
+    2[0-9][0-9]) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints one live Gitea pull request as compact JSON after checking that it is
+# an object for exactly <number>, so an error body or another pull request can
+# never be read as this one.
+fm_pr_gitea_read_pull() {  # <origin> <path> <number>
+  local origin=$1 path=$2 number=$3 body json
+  fm_pr_gitea_path_valid "$path" || return 1
+  case "$number" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  body=$(mktemp "${TMPDIR:-/tmp}/fm-pr-gitea-body.XXXXXX") || return 1
+  if ! fm_pr_gitea_api "$origin" GET "/api/v1/repos/$path/pulls/$number" "$body"; then
+    rm -f -- "$body"
+    return 1
+  fi
+  json=$(jq -c --argjson number "$number" '
+    if type == "object" and .number == $number then . else error("not this pull request") end'     < "$body" 2>/dev/null) || { rm -f -- "$body"; return 1; }
+  rm -f -- "$body"
+  printf '%s\n' "$json"
+}
+
+# The merged state of one Gitea pull request. merged is read from Gitea's own
+# boolean rather than inferred from the state, because a merged pull request is
+# also closed and a closed one need not be merged.
+fm_pr_gitea_read_record() {  # <origin> <path> <number>
+  local json fields state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  json=$(fm_pr_gitea_read_pull "$1" "$2" "$3") || return 1
+  fields=$(printf '%s' "$json" | jq -r '
+    if (.state | type) == "string" and (.state == "open" or .state == "closed")
+       and (.merged | type) == "boolean"
+    then (if .merged then "MERGED" else (.state | ascii_upcase) end) + " " + (.merged | tostring)
+    else error("invalid pull request state")
+    end' 2>/dev/null) || return 1
+  state=${fields% *}
+  merged=${fields#* }
+  [ -n "$state" ] || return 1
+  [ "$merged" = true ] || [ "$merged" = false ] || return 1
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# Prints every latest commit status at exactly <sha> as a compact JSON array of
+# {context, status}. Gitea's combined status endpoint already keeps only the
+# latest status per context, so no supersession rule is needed, but it is
+# paginated and its body total_count counts only the current page, so pages are
+# read until the X-Total-Count header's whole-list count is reached. A short or
+# empty page before that count, a count that is absent or changes between pages,
+# a body whose sha is not <sha>, or more pages than the bound all refuse rather
+# than return a partial list that could hide a red check.
+fm_pr_gitea_read_statuses() {  # <origin> <path> <sha>
+  local origin=$1 path=$2 sha=$3 body page=1 total='' collected='[]' items count
+  fm_pr_gitea_path_valid "$path" || return 1
+  fm_pr_head_valid "$sha" || return 1
+  body=$(mktemp "${TMPDIR:-/tmp}/fm-pr-gitea-body.XXXXXX") || return 1
+  while :; do
+    if ! fm_pr_gitea_api "$origin" GET "/api/v1/repos/$path/commits/$sha/status?limit=50&page=$page" "$body"; then
+      rm -f -- "$body"
+      return 1
+    fi
+    if [ -z "$FM_PR_GITEA_TOTAL" ] || { [ -n "$total" ] && [ "$total" != "$FM_PR_GITEA_TOTAL" ]; }; then
+      rm -f -- "$body"
+      return 1
+    fi
+    total=$FM_PR_GITEA_TOTAL
+    items=$(jq -c --arg sha "$sha" '
+      if type == "object" and .sha == $sha
+         and (.statuses == null or (.statuses | type) == "array")
+      then [ (.statuses // [])[]
+             | if type == "object" and (.context | type) == "string" and (.context | length) > 0
+                  and (.status | type) == "string"
+               then {context, status}
+               else error("invalid commit status")
+               end ]
+      else error("invalid combined status")
+      end' < "$body" 2>/dev/null) || { rm -f -- "$body"; return 1; }
+    collected=$(jq -cn --argjson a "$collected" --argjson b "$items" '$a + $b') || { rm -f -- "$body"; return 1; }
+    count=$(printf '%s' "$collected" | jq 'length') || { rm -f -- "$body"; return 1; }
+    [ "$count" -le "$total" ] || { rm -f -- "$body"; return 1; }
+    [ "$count" -lt "$total" ] || break
+    [ "$(printf '%s' "$items" | jq 'length')" -gt 0 ] || { rm -f -- "$body"; return 1; }
+    page=$((page + 1))
+    [ "$page" -le 20 ] || { rm -f -- "$body"; return 1; }
+  done
+  rm -f -- "$body"
+  printf '%s' "$collected" | jq -c 'if (map(.context) | unique | length) == length then . else error("duplicate context") end' 2>/dev/null
 }
 
 fm_pr_poll_retirement_data_valid() {

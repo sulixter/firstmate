@@ -6,9 +6,10 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
-# tooling to follow the first two. The Gerrit branch additionally needs jq,
-# which bin/fm-pr-check.sh refuses to arm a Gerrit watch without.
+# GitLab, gerrit-axi for Gerrit, and tea for Gitea, so an upstream checkout
+# needs no extra tooling to follow the first two. The Gerrit and Gitea branches
+# additionally need jq, which bin/fm-pr-check.sh refuses to arm either watch
+# without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -170,6 +171,78 @@ case "$provider" in
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
     [ "$status" = MERGED ] && printf '%s\n' merged
+    ;;
+  gitea)
+    # The host field is the whole origin, <scheme>://<host>[:<port>], because
+    # Gitea alone may be served over http or on a non-default port; the same
+    # canonical rules bin/fm-pr-lib.sh's fm_pr_url_parse applies are re-applied
+    # here before anything is read.
+    case "$host" in
+      http://*) scheme=http; authority=${host#http://} ;;
+      https://*) scheme=https; authority=${host#https://} ;;
+      *) exit 0 ;;
+    esac
+    case "$authority" in
+      *:*) name=${authority%:*}; port=${authority##*:} ;;
+      *) name=$authority; port= ;;
+    esac
+    [ "${#name}" -ge 1 ] && [ "${#name}" -le 253 ] || exit 0
+    [ "$name" != github.com ] || exit 0
+    case "$name" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    if [ -n "$port" ]; then
+      case "$port" in
+        [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9]) ;;
+        *) exit 0 ;;
+      esac
+      [ "$port" -le 65535 ] || exit 0
+      [ "$scheme:$port" != http:80 ] && [ "$scheme:$port" != https:443 ] || exit 0
+    fi
+    owner=${path%%/*}
+    repo=${path#*/}
+    case "$repo" in */*|'') exit 0 ;; esac
+    [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 40 ] || exit 0
+    case "$owner" in
+      [!A-Za-z0-9]*|*[!A-Za-z0-9]|*[!A-Za-z0-9._-]*|*[._-][._-]*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|-*|*.git|*.wiki|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "$host/$owner/$repo/pulls/$number" ] || exit 0
+    # tea is addressed only through the one login whose configured URL is
+    # exactly this origin, so the record can never send a credential to another
+    # server, and it runs from / so no repository context can redirect it.
+    # tea api exits zero on an HTTP error status, so the status line --include
+    # writes to stderr must read 200, and only Gitea's own merged boolean on the
+    # pull request with this exact number can wake the poll.
+    logins=$(cd / && tea logins list --output json 2>/dev/null) || exit 0
+    login=$(printf '%s' "$logins" | jq -r --arg origin "$host" '
+      if type != "array" then error("invalid logins") else . end
+      | [ .[]
+          | select(type == "object" and (.url | type) == "string" and (.name | type) == "string")
+          | select((.url | sub("/+$"; "")) == $origin)
+          | .name ]
+      | if length == 1 and (.[0] | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+        then .[0]
+        else error("no unique login")
+        end' 2>/dev/null) || exit 0
+    [ -n "$login" ] || exit 0
+    headers=$(mktemp "${TMPDIR:-/tmp}/fm-pr-poll-gitea.XXXXXX") || exit 0
+    trap 'rm -f -- "$headers"' EXIT
+    body=$(cd / && tea api --login "$login" --include --method GET \
+      "/api/v1/repos/$owner/$repo/pulls/$number" 2>"$headers") || exit 0
+    status=$(tr -d '\r' < "$headers" | awk '
+      /^HTTP\/[0-9.]+ [0-9][0-9][0-9]( |$)/ { count++; code=$2 }
+      END { if (count == 1) print code; else exit 1 }') || exit 0
+    [ "$status" = 200 ] || exit 0
+    merged=$(printf '%s' "$body" | jq -r --argjson number "$number" '
+      if type == "object" and .number == $number and (.merged | type) == "boolean"
+      then (.merged | tostring)
+      else error("not this pull request")
+      end' 2>/dev/null) || exit 0
+    [ "$merged" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

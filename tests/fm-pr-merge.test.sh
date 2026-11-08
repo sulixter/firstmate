@@ -2358,6 +2358,390 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+# The Gitea fixture: a private-network origin served over plain http on a
+# non-default port, the shape a self-hosted Gitea commonly has, and one that no
+# other provider's URL pattern accepts.
+GITEA_ORIGIN=http://gitea.example:3000
+GITEA_URL="$GITEA_ORIGIN/owner/repo/pulls/5"
+GITEA_HEAD=dddddddddddddddddddddddddddddddddddddddd
+
+# make_gitea_case <name>: a case dir whose tea answers for a green, open,
+# mergeable pull request at GITEA_HEAD. Echoes the case dir.
+make_gitea_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+  fm_fake_tea "$case_dir/fakebin" "$case_dir/tea"
+  fm_fake_tea_fixture "$case_dir/tea" "$GITEA_ORIGIN" "$GITEA_HEAD"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+  printf '%s\n' "$case_dir"
+}
+
+# The tea api calls a case made, one per line, as "<method> <path>".
+gitea_api_calls() {
+  awk '$1 == "api" { method = ""; path = ""
+    for (i = 2; i <= NF; i++) {
+      if ($i == "--method") { method = $(i + 1); i++ }
+      else if ($i == "--login" || $i == "--data") { i++ }
+      else if ($i != "--include") { path = $i }
+    }
+    print method " " path }' "$1/tea/tea.log"
+}
+
+gitea_merge_posted() {
+  gitea_api_calls "$1" | grep -q '^POST .*/pulls/5/merge$'
+}
+
+# Rewrite one field of a fixture JSON file with a jq filter.
+gitea_fixture_set() {
+  local file=$1 filter=$2 tmp
+  tmp=$(mktemp "$file.XXXXXX")
+  "$JQ_BIN" -c "$filter" "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# gitea_statuses <case_dir> <context>=<status> ...: one page of commit statuses
+# at the fixture head, with its whole-list count.
+# shellcheck disable=SC2016  # The single-quoted jq programs name jq variables.
+gitea_statuses() {
+  local case_dir=$1 kv list='[]'
+  shift
+  for kv in "$@"; do
+    list=$("$JQ_BIN" -c --arg c "${kv%%=*}" --arg s "${kv#*=}" '. + [{context: $c, status: $s}]' <<< "$list")
+  done
+  "$JQ_BIN" -c --arg sha "$GITEA_HEAD" '{sha: $sha, total_count: length, statuses: .}' <<< "$list" \
+    > "$case_dir/tea/status-1.json"
+  "$JQ_BIN" 'length' <<< "$list" > "$case_dir/tea/status.total"
+}
+
+test_gitea_pull_request_merges_through_its_origin_login() {
+  local case_dir rc request
+  case_dir=$(make_gitea_case gitea-merges)
+  gitea_statuses "$case_dir" ci=success lint=success
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitea-merges: a green Gitea pull request should merge: $(cat "$case_dir/stderr")"
+  assert_grep "pr=$GITEA_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-merges: pr= was not recorded before merging"
+  assert_grep 'logins list --output json' "$case_dir/tea/tea.log" \
+    "gitea-merges: the login was not resolved from tea's own login list"
+  ! grep '^api ' "$case_dir/tea/tea.log" | grep -v -- '--login home --include' >/dev/null \
+    || fail "gitea-merges: a tea api call did not use the origin's login with --include"
+  request=$("$JQ_BIN" -cS . "$case_dir/tea/request.json")
+  [ "$request" = "{\"delete_branch_after_merge\":false,\"do\":\"merge\",\"force_merge\":false,\"head_commit_id\":\"$GITEA_HEAD\",\"merge_when_checks_succeed\":false}" ] \
+    || fail "gitea-merges: unexpected merge request body: $request"
+  assert_grep "verified: $GITEA_URL is merged" "$case_dir/stdout" \
+    "gitea-merges: the landed state was not confirmed"
+  assert_grep "merge landed: task-x1 $GITEA_URL" "$case_dir/state/.wake-queue" \
+    "gitea-merges: the landed merge left no durable outcome"
+  [ "$(sed -n 2,5p "$case_dir/state/task-x1.merge-authority" | tr '\n' ' ')" = "gitea $GITEA_ORIGIN owner/repo 5 " ] \
+    || fail "gitea-merges: the persisted merge authority does not bind the origin-qualified identity"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "gitea-merges: a Gitea pull request reached gh-axi"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "gitea-merges: a Gitea pull request reached gh pr merge"
+  pass "fm-pr-merge merges a green Gitea pull request through the tea login for its exact origin, bound to the verified head"
+}
+
+test_gitea_each_condition_refuses_independently() {
+  local case_dir rc spec name expect
+  while IFS='#' read -r name spec expect; do
+    [ -n "$name" ] || continue
+    case_dir=$(make_gitea_case "gitea-refuse-$name")
+    gitea_statuses "$case_dir" ci=success
+    case "$spec" in
+      pull:*) gitea_fixture_set "$case_dir/tea/pull.json" "${spec#pull:}" ;;
+      branch:*) gitea_fixture_set "$case_dir/tea/branch.json" "${spec#branch:}" ;;
+      branch-no-status:*)
+        gitea_fixture_set "$case_dir/tea/branch.json" "${spec#branch-no-status:}"
+        gitea_statuses "$case_dir"
+        ;;
+      statuses:*) eval "gitea_statuses \"\$case_dir\" ${spec#statuses:}" ;;
+    esac
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-refuse-$name: the merge should be refused"
+    assert_grep "$expect" "$case_dir/stderr" "gitea-refuse-$name: the refusal did not name the condition"
+    ! gitea_merge_posted "$case_dir" || fail "gitea-refuse-$name: the merge was posted despite the refusal"
+    assert_absent "$case_dir/state/.wake-queue" "gitea-refuse-$name: a refused merge recorded an outcome"
+  done <<'CASES'
+closed#pull:.state = "closed"#state is "closed", not open
+merged#pull:.merged = true#merged is "true", not false
+draft#pull:.draft = true#the pull request is a draft
+draft-unreadable#pull:del(.draft)#the pull request is a draft, or its draft state is unreadable
+unmergeable#pull:.mergeable = false#mergeable is "false", not true
+no-merge-right#branch:.user_can_merge = false#cannot merge into base branch main
+red#statuses:ci=failure#check 'ci' is not green (failure)
+pending#statuses:ci=pending#check 'ci' is not green (pending)
+skipped#statuses:ci=skipped#check 'ci' is not green (skipped)
+required-unreported#branch:.protected = true | .enable_status_check = true | .status_check_contexts = ["build"]#required check 'build' has not reported
+required-none-reported#branch-no-status:.protected = true | .enable_status_check = true | .status_check_contexts = []#requires status checks and none has reported
+required-glob#branch:.protected = true | .enable_status_check = true | .status_check_contexts = ["ci*"]#required check pattern 'ci*' uses glob syntax
+CASES
+  # The required-none case above has one status, so it must still merge: the
+  # no-status refusal is only for a protected branch with nothing reported.
+  case_dir=$(make_gitea_case gitea-required-none-with-status)
+  gitea_fixture_set "$case_dir/tea/branch.json" '.protected = true | .enable_status_check = true | .status_check_contexts = []'
+  gitea_statuses "$case_dir" ci=success
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitea-required-none-with-status: a protected branch with a green status should merge: $(cat "$case_dir/stderr")"
+  # A required check that has reported green satisfies the rule.
+  case_dir=$(make_gitea_case gitea-required-reported)
+  gitea_fixture_set "$case_dir/tea/branch.json" '.protected = true | .enable_status_check = true | .status_check_contexts = ["build"]'
+  gitea_statuses "$case_dir" build=success
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitea-required-reported: a reported green required check should merge: $(cat "$case_dir/stderr")"
+  pass "fm-pr-merge refuses a Gitea pull request on each unmet condition independently, before posting any merge"
+}
+
+test_gitea_reports_every_failing_condition() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-every-condition)
+  gitea_fixture_set "$case_dir/tea/pull.json" '.draft = true | .mergeable = false'
+  gitea_fixture_set "$case_dir/tea/branch.json" '.protected = true | .enable_status_check = true | .status_check_contexts = ["build"]'
+  gitea_statuses "$case_dir" ci=failure
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-every-condition: the merge should be refused"
+  assert_grep 'the pull request is a draft' "$case_dir/stderr" "gitea-every-condition: draft not reported"
+  assert_grep 'mergeable is "false"' "$case_dir/stderr" "gitea-every-condition: mergeable not reported"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" "gitea-every-condition: red check not reported"
+  assert_grep 'these required checks have not reported: build' "$case_dir/stderr" \
+    "gitea-every-condition: unreported required check not reported"
+  pass "fm-pr-merge reports every failing Gitea condition together"
+}
+
+test_gitea_requires_exactly_one_login_for_the_origin() {
+  local case_dir rc name logins
+  while IFS='|' read -r name logins; do
+    [ -n "$name" ] || continue
+    case_dir=$(make_gitea_case "gitea-login-$name")
+    printf '%s\n' "$logins" > "$case_dir/tea/logins.json"
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-login-$name: the merge should be refused"
+    assert_grep "requires exactly one tea login whose URL is $GITEA_ORIGIN" "$case_dir/stderr" \
+      "gitea-login-$name: the refusal did not name the origin"
+    ! grep -q '^api ' "$case_dir/tea/tea.log" \
+      || fail "gitea-login-$name: a Gitea API request was made without a matching login"
+    assert_no_grep "pr=$GITEA_URL" "$case_dir/state/task-x1.meta" \
+      "gitea-login-$name: a PR reference was recorded without a matching login"
+  done <<'CASES'
+none|[]
+other-origin|[{"name":"home","url":"http://gitea.example:3001"}]
+other-scheme|[{"name":"home","url":"https://gitea.example:3000"}]
+ambiguous|[{"name":"a","url":"http://gitea.example:3000"},{"name":"b","url":"http://gitea.example:3000/"}]
+CASES
+  pass "fm-pr-merge reaches Gitea only through exactly one tea login whose URL is the pull request's origin"
+}
+
+test_gitea_http_error_status_is_never_success() {
+  local case_dir rc
+  # tea api exits zero on an HTTP error, so an error body for the read must
+  # refuse rather than be mistaken for the pull request.
+  case_dir=$(make_gitea_case gitea-read-404)
+  printf '404\n' > "$case_dir/tea/pull.status"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-read-404: an unreadable pull request should refuse"
+  assert_grep 'could not read the Gitea pull request state before merging' "$case_dir/stderr" \
+    "gitea-read-404: the refusal did not name the unreadable state"
+  ! gitea_merge_posted "$case_dir" || fail "gitea-read-404: a merge was posted on an unread state"
+
+  # A refused merge request reports Gitea's own status and message and lands nothing.
+  case_dir=$(make_gitea_case gitea-merge-409)
+  printf '409\n' > "$case_dir/tea/merge.status"
+  printf '%s\n' '{"message":"head out of date"}' > "$case_dir/tea/merge.body"
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-merge-409: a refused merge request should fail"
+  assert_grep "Gitea did not accept the merge of $GITEA_URL (HTTP status 409)" "$case_dir/stderr" \
+    "gitea-merge-409: the HTTP status was not reported"
+  assert_grep 'forge said: head out of date' "$case_dir/stderr" \
+    "gitea-merge-409: Gitea's own message was not quoted"
+  assert_absent "$case_dir/state/.wake-queue" "gitea-merge-409: a refused merge recorded an outcome"
+  [ -f "$case_dir/state/task-x1.check.sh" ] || fail "gitea-merge-409: the merge poll was not left armed"
+  pass "a Gitea HTTP error status is never read as a pull request or an accepted merge"
+}
+
+test_gitea_unconfirmed_merge_refuses_and_keeps_the_poll() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-unconfirmed)
+  rm -f "$case_dir/tea/pull-post.json"
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-unconfirmed: an accepted merge that reads back unmerged must not succeed"
+  assert_grep 'reads back unmerged; the merge poll remains armed' "$case_dir/stderr" \
+    "gitea-unconfirmed: the unconfirmed state was not reported"
+  assert_absent "$case_dir/state/.wake-queue" "gitea-unconfirmed: an unconfirmed merge recorded an outcome"
+  [ -f "$case_dir/state/task-x1.check.sh" ] || fail "gitea-unconfirmed: the merge poll was not left armed"
+  pass "a Gitea merge is reported landed only when the live pull request reads merged"
+}
+
+test_gitea_extra_arguments_are_limited_to_a_merge_style() {
+  local case_dir rc args expect name
+  case_dir=$(make_gitea_case gitea-style-squash)
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-style-squash: merge failed: $(cat "$case_dir/stderr")"
+  [ "$("$JQ_BIN" -r .do "$case_dir/tea/request.json")" = squash ] \
+    || fail "gitea-style-squash: the caller's style was not sent"
+  ! gitea_api_calls "$case_dir" | grep -q '^GET /api/v1/repos/owner/repo$' \
+    || fail "gitea-style-squash: the default style was read although the caller named one"
+
+  case_dir=$(make_gitea_case gitea-style-default)
+  printf '%s\n' '{"default_merge_style":"rebase-merge"}' > "$case_dir/tea/repo.json"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-style-default: merge failed"
+  [ "$("$JQ_BIN" -r .do "$case_dir/tea/request.json")" = rebase-merge ] \
+    || fail "gitea-style-default: the repository's default style was not sent"
+
+  case_dir=$(make_gitea_case gitea-style-manual-default)
+  printf '%s\n' '{"default_merge_style":"manually-merged"}' > "$case_dir/tea/repo.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-style-manual-default: a manually-merged default must refuse"
+  ! gitea_merge_posted "$case_dir" || fail "gitea-style-manual-default: a merge was posted"
+
+  while IFS='|' read -r name args expect; do
+    [ -n "$name" ] || continue
+    case_dir=$(make_gitea_case "gitea-args-$name")
+    set +e
+    # shellcheck disable=SC2086  # Each case's arguments are split deliberately.
+    run_pr_merge "$case_dir" task-x1 "$GITEA_URL" $args > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "gitea-args-$name: the arguments should be refused"
+    assert_grep "$expect" "$case_dir/stderr" "gitea-args-$name: the refusal did not explain itself"
+    ! grep -q '^api ' "$case_dir/tea/tea.log" || fail "gitea-args-$name: Gitea was contacted"
+  done <<'CASES'
+manual|-- --method manually-merged|unsupported Gitea merge style
+two-styles|-- --merge --squash|at most one merge style
+delete-branch|--attended-override -- --delete-branch|accepts only a merge style
+auto|--attended-override -- --auto|accepts only a merge style
+force|-- --force_merge|accepts only a merge style
+allow-red|--allow-red ci|--allow-red does not apply to Gitea
+allow-missing|--allow-missing ci|--allow-missing does not apply to Gitea
+CASES
+  pass "a Gitea merge takes only a merge style from the caller and never manually-merged"
+}
+
+test_gitea_statuses_are_read_across_every_page() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-status-pages)
+  printf '{"sha":"%s","statuses":[{"context":"a","status":"success"},{"context":"b","status":"success"}]}\n' \
+    "$GITEA_HEAD" > "$case_dir/tea/status-1.json"
+  printf '{"sha":"%s","statuses":[{"context":"c","status":"failure"}]}\n' \
+    "$GITEA_HEAD" > "$case_dir/tea/status-2.json"
+  printf '3\n' > "$case_dir/tea/status.total"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-status-pages: a red status on the second page must refuse"
+  assert_grep "check 'c' is not green (failure)" "$case_dir/stderr" \
+    "gitea-status-pages: the second page was not read"
+
+  # A list that ends short of its whole-list count cannot be read completely.
+  case_dir=$(make_gitea_case gitea-status-short)
+  printf '{"sha":"%s","statuses":[{"context":"a","status":"success"}]}\n' \
+    "$GITEA_HEAD" > "$case_dir/tea/status-1.json"
+  printf '2\n' > "$case_dir/tea/status.total"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-status-short: a short status list must refuse"
+  assert_grep "commit statuses at head $GITEA_HEAD could not be read" "$case_dir/stderr" \
+    "gitea-status-short: the incomplete read was not reported"
+
+  # Statuses for another commit are never read as this head's.
+  case_dir=$(make_gitea_case gitea-status-other-sha)
+  printf '{"sha":"%s","statuses":[]}\n' eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee > "$case_dir/tea/status-1.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-status-other-sha: statuses for another commit must refuse"
+  ! gitea_merge_posted "$case_dir" || fail "gitea-status-other-sha: a merge was posted"
+  pass "Gitea commit statuses are read across every page at the exact head, and an incomplete read refuses"
+}
+
+test_gitea_away_record_merges_under_away_authority() {
+  local case_dir
+  case_dir=$(make_gitea_case gitea-away)
+  mkdir -p "$case_dir/home"
+  write_away_record "$case_dir" --words 'merge the finance fixes when green'
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$GITEA_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-away: a green merge under the record should succeed: $(cat "$case_dir/stderr")"
+  assert_grep "merge landed: task-x1 $GITEA_URL away" "$case_dir/state/.wake-queue" \
+    "gitea-away: the durable outcome did not tag away"
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority")" = away ] \
+    || fail "gitea-away: the persisted merge authority is not away"
+  [ "$("$JQ_BIN" -r .merge_when_checks_succeed "$case_dir/tea/request.json")" = false ] \
+    || fail "gitea-away: an away merge was not sent as an immediate merge"
+  pass "a green Gitea merge proceeds under away authority as one immediate request"
+}
+
+test_gitea_captain_hold_gate_runs_before_the_merge() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-hold-unreadable)
+  chmod 000 "$case_dir/home/data/backlog.md"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$case_dir/home/data/backlog.md"
+  expect_code 1 "$rc" "gitea-hold-unreadable: an unreadable captain-hold record must refuse"
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "gitea-hold-unreadable: the refusal did not say it refused to merge"
+  ! gitea_merge_posted "$case_dir" || fail "gitea-hold-unreadable: the merge was posted despite the refusal"
+  pass "the captain-hold gate runs before a Gitea merge is posted"
+}
+
+test_gitea_missing_tool_refuses_before_recording() {
+  local case_dir rc tool
+  for tool in tea jq; do
+    case_dir=$(make_gitea_case "gitea-no-$tool")
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    PATH="$case_dir/no$tool" \
+      "$PR_MERGE" task-x1 "$GITEA_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-no-$tool: fm-pr-merge should refuse"
+    assert_grep "error: merging a Gitea pull request requires $tool on PATH" \
+      "$case_dir/stderr" "gitea-no-$tool: refusal did not name the missing tool"
+    assert_no_grep "pr=$GITEA_URL" "$case_dir/state/task-x1.meta" \
+      "gitea-no-$tool: a PR reference was recorded despite the missing tool"
+  done
+  pass "fm-pr-merge refuses a Gitea merge before recording anything when tea or jq is absent"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -3886,3 +4270,14 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
+test_gitea_pull_request_merges_through_its_origin_login
+test_gitea_each_condition_refuses_independently
+test_gitea_reports_every_failing_condition
+test_gitea_requires_exactly_one_login_for_the_origin
+test_gitea_http_error_status_is_never_success
+test_gitea_unconfirmed_merge_refuses_and_keeps_the_poll
+test_gitea_extra_arguments_are_limited_to_a_merge_style
+test_gitea_statuses_are_read_across_every_page
+test_gitea_away_record_merges_under_away_authority
+test_gitea_missing_tool_refuses_before_recording
+test_gitea_captain_hold_gate_runs_before_the_merge

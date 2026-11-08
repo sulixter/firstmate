@@ -533,6 +533,104 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_fake_tea <fakebin> <fixture-dir>
+# Drops a tea stub that reproduces the two tea contracts Firstmate's Gitea path
+# relies on: `tea logins list --output json` prints <fixture-dir>/logins.json,
+# and `tea api --login <name> --include --method <M> [--data @<file>] <path>`
+# writes the HTTP status line and headers to stderr, the body to stdout, and
+# exits zero whatever the HTTP status, exactly as the real tea api does.
+# Every invocation is appended to <fixture-dir>/tea.log, and a request body is
+# copied to <fixture-dir>/request.json. Responses come from fixture files:
+#   pull.json (pull-post.json once a merge was accepted, when it exists),
+#   branch.json, repo.json, status-<page>.json with status.total as the
+#   X-Total-Count header, and merge.status / merge.body for the merge POST.
+# A <name>.status file overrides the default 200 for pull, branch, repo, or
+# status reads, and tea-fails makes every call exit 1 with no output.
+# fm_fake_tea_fixture <fixture-dir> <origin> <head> writes a fixture whose pull
+# request is open, mergeable, and not a draft at <head> on an unprotected main,
+# with no commit statuses and a repository default merge style of merge.
+fm_fake_tea() {
+  local fakebin=$1 fixture=$2
+  mkdir -p "$fixture"
+  : > "$fixture/tea.log"
+  cat > "$fakebin/tea" <<SH
+#!/usr/bin/env bash
+fixture='$fixture'
+SH
+  cat >> "$fakebin/tea" <<'SH'
+printf '%s\n' "$*" >> "$fixture/tea.log"
+[ ! -e "$fixture/tea-fails" ] || exit 1
+if [ "${1:-} ${2:-} ${3:-} ${4:-}" = "logins list --output json" ]; then
+  cat "$fixture/logins.json" 2>/dev/null || printf '[]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 2
+shift
+method=GET
+data=
+endpoint=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --login|--method|--data) [ "$1" = --method ] && method=$2; [ "$1" = --data ] && data=$2; shift 2 ;;
+    --include) shift ;;
+    *) endpoint=$1; shift ;;
+  esac
+done
+respond() {  # <status> <body-file> [total]
+  printf 'HTTP/1.1 %s Fixture\r\nContent-Type: application/json\r\n' "$1" >&2
+  [ -z "${3:-}" ] || printf 'X-Total-Count: %s\r\n' "$3" >&2
+  [ ! -f "$2" ] || cat "$2"
+  exit 0
+}
+status_of() { cat "$fixture/$1.status" 2>/dev/null || printf '200\n'; }
+case "$method $endpoint" in
+  "POST /api/v1/repos/"*/pulls/*/merge)
+    [ -z "$data" ] || cp "${data#@}" "$fixture/request.json"
+    code=$(cat "$fixture/merge.status" 2>/dev/null || printf '200\n')
+    case "$code" in 2??) : > "$fixture/merged" ;; esac
+    respond "$code" "$fixture/merge.body"
+    ;;
+  "GET /api/v1/repos/"*/pulls/*)
+    if [ -e "$fixture/merged" ] && [ -f "$fixture/pull-post.json" ]; then
+      respond 200 "$fixture/pull-post.json"
+    fi
+    respond "$(status_of pull)" "$fixture/pull.json"
+    ;;
+  "GET /api/v1/repos/"*/branches/*)
+    respond "$(status_of branch)" "$fixture/branch.json"
+    ;;
+  "GET /api/v1/repos/"*/commits/*/status\?limit=50\&page=*)
+    page=${endpoint##*page=}
+    respond "$(status_of status)" "$fixture/status-$page.json" "$(cat "$fixture/status.total" 2>/dev/null)"
+    ;;
+  "GET /api/v1/repos/"*/*)
+    case "${endpoint#/api/v1/repos/}" in
+      */*/*) respond 404 /dev/null ;;
+    esac
+    respond "$(status_of repo)" "$fixture/repo.json"
+    ;;
+esac
+respond 404 /dev/null
+SH
+  chmod +x "$fakebin/tea"
+}
+
+fm_fake_tea_fixture() {
+  local fixture=$1 origin=$2 head=$3
+  mkdir -p "$fixture"
+  printf '[{"name":"home","url":"%s","ssh_host":"","user":"fixture","default":"false"}]\n' \
+    "$origin" > "$fixture/logins.json"
+  printf '{"number":5,"state":"open","draft":false,"merged":false,"mergeable":true,"head":{"sha":"%s","ref":"fm/task"},"base":{"ref":"main"}}\n' \
+    "$head" > "$fixture/pull.json"
+  printf '{"number":5,"state":"closed","draft":false,"merged":true,"mergeable":false,"head":{"sha":"%s","ref":"fm/task"},"base":{"ref":"main"}}\n' \
+    "$head" > "$fixture/pull-post.json"
+  printf '%s\n' '{"name":"main","protected":false,"enable_status_check":false,"status_check_contexts":[],"user_can_merge":true}' \
+    > "$fixture/branch.json"
+  printf '%s\n' '{"default_merge_style":"merge"}' > "$fixture/repo.json"
+  printf '0\n' > "$fixture/status.total"
+  printf '{"sha":"%s","total_count":0,"statuses":null}\n' "$head" > "$fixture/status-1.json"
+}
+
 # fm_fake_claude_outside_read_gate <fakebin>
 # Drops a claude stub that models the 2.1.257 outside-read gate instead of
 # answering like a generic exit-0 tool: it resolves its own cwd and every

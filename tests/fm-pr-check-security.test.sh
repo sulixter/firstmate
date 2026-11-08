@@ -437,6 +437,34 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://github.com/o/r/pulls/1'
+  'http://github.com/o/r/pulls/1'
+  'http://gitea.example:3000/o/r/pulls/0'
+  'http://gitea.example:3000/o/r/pulls/01'
+  'http://gitea.example:3000/o/r/pulls/1/'
+  'http://gitea.example:3000/o/r/pulls/1?x=1'
+  'http://gitea.example:3000/o/r/pull/1'
+  'http://gitea.example:3000/g/o/r/pulls/1'
+  'http://gitea.example:3000/o/pulls/1'
+  'http://gitea.example:80/o/r/pulls/1'
+  'https://gitea.example:443/o/r/pulls/1'
+  'http://gitea.example:0/o/r/pulls/1'
+  'http://gitea.example:03000/o/r/pulls/1'
+  'http://gitea.example:65536/o/r/pulls/1'
+  'http://gitea.example:/o/r/pulls/1'
+  'http://user@gitea.example/o/r/pulls/1'
+  'http://Gitea.example/o/r/pulls/1'
+  'http://gitea.example./o/r/pulls/1'
+  'ftp://gitea.example/o/r/pulls/1'
+  'HTTP://gitea.example/o/r/pulls/1'
+  'http://gitea.example/-o/r/pulls/1'
+  'http://gitea.example/o-/r/pulls/1'
+  'http://gitea.example/o--p/r/pulls/1'
+  'http://gitea.example/o/-r/pulls/1'
+  'http://gitea.example/o/r.git/pulls/1'
+  'http://gitea.example/o/r.wiki/pulls/1'
+  'http://gitea.example/o/../pulls/1'
+  'http://gitea.example/o/r$/pulls/1'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -520,6 +548,22 @@ https://review.internal/c/group/apps/console/+/4201|review.internal|group/apps/c
 https://gerrit.example/c/proj/+/1|gerrit.example|proj|1
 https://gerrit.example.co.uk/c/a/b/c/d/+/42|gerrit.example.co.uk|a/b/c/d|42
 https://review.internal/c/All-Projects/+/123456|review.internal|All-Projects|123456
+EOF
+  # Gitea alone may be served over http or on a port, so its host is the whole
+  # origin and two servers differing only by scheme or port never share one.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gitea pull request URL: $url"
+    [ "$FM_PR_PROVIDER" = gitea ] || fail "parser did not tag a Gitea pull request URL as gitea"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gitea pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gitea origin for $url: $FM_PR_HOST"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gitea repository path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gitea pull request number"
+  done <<'EOF'
+http://gitea.home.example:3000/sramos/personal-finance/pulls/1|http://gitea.home.example:3000|sramos/personal-finance|1
+https://codeberg.org/a.b/c_d/pulls/12|https://codeberg.org|a.b/c_d|12
+http://10.0.0.5/team/app.v2/pulls/345|http://10.0.0.5|team/app.v2|345
+https://git.internal:8443/o/r/pulls/7|https://git.internal:8443|o/r|7
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -2083,6 +2127,130 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+# Every Gitea read goes through tea's API with the HTTP status read from the
+# --include header, because tea api exits zero on an HTTP error; the fixture tea
+# reproduces that contract (tests/lib.sh fm_fake_tea).
+test_gitea_merge_watch() {
+  local dir state out rc url origin notea entry bindir name
+  dir=$(make_case gitea-merge-watch)
+  state="$dir/home/state"
+  origin=http://gitea.example:3000
+  url="$origin/owner/repo/pulls/5"
+  fm_fake_tea "$dir/fakebin" "$dir/tea"
+  fm_fake_tea_fixture "$dir/tea" "$origin" 0123456789abcdef0123456789abcdef01234567
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  # Arming records the canonical URL and an origin-qualified sidecar.
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "arming a Gitea watch failed: $(cat "$dir/arm.err")"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "arming did not record the Gitea pr="
+  ! grep -q '^pr_head=' "$state/task-a.meta" || fail "arming recorded a pr_head for a Gitea pull request"
+  [ "$(cat "$state/task-a.pr-poll")" = "gitea
+$url
+$origin
+owner/repo
+5" ] || fail "published Gitea sidecar bytes were not exact"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gitea poll provenance or metadata binding was invalid"
+
+  # Only Gitea's own merged boolean, read with a 200 status, wakes firstmate.
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for an open pull request"
+  cp "$dir/tea/pull-post.json" "$dir/tea/pull.json"
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line"
+  printf '404\n' > "$dir/tea/pull.status"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a merged-looking body with an HTTP error status"
+  rm -f "$dir/tea/pull.status"
+  "$REAL_JQ" -c '.number = 6' "$dir/tea/pull-post.json" > "$dir/tea/pull.json"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for another pull request's record"
+  cp "$dir/tea/pull-post.json" "$dir/tea/pull.json"
+  : > "$dir/tea/tea-fails"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted after a tea failure"
+  rm -f "$dir/tea/tea-fails"
+  grep -qF -- "api --login home --include --method GET /api/v1/repos/owner/repo/pulls/5" "$dir/tea/tea.log" \
+    || fail "Gitea poll did not read through the origin's login by API path"
+
+  # No login for the origin, or an ambiguous pair, reaches nothing.
+  cp "$dir/tea/logins.json" "$dir/tea/logins.saved"
+  printf '%s\n' '[{"name":"other","url":"http://gitea.example:3001"}]' > "$dir/tea/logins.json"
+  : > "$dir/tea/tea.log"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted without a login for its origin"
+  ! grep -q '^api ' "$dir/tea/tea.log" || fail "Gitea poll made an API request without a matching login"
+  printf '%s\n' '[{"name":"a","url":"http://gitea.example:3000"},{"name":"b","url":"http://gitea.example:3000"}]' \
+    > "$dir/tea/logins.json"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted with an ambiguous login"
+  cp "$dir/tea/logins.saved" "$dir/tea/logins.json"
+
+  # A doctored sidecar cannot redirect the poll at another server or project.
+  for doctored in https://gitea.example:3000 http://gitea.example:3001 http://gitea.example http://elsewhere.example:3000; do
+    printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" "$doctored" owner/repo 5 > "$state/task-a.pr-poll"
+    out=$(run_poll "$dir")
+    [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose origin was swapped to $doctored"
+  done
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" "$origin" owner/other 5 > "$state/task-a.pr-poll"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose repository was swapped"
+
+  # A draft is refused at arming, like a GitHub draft.
+  "$REAL_JQ" -c '.draft = true | .merged = false | .state = "open"' "$dir/tea/pull-post.json" > "$dir/tea/pull.json"
+  write_task_meta "$dir" task-d
+  set +e
+  out=$(run_check_entry "$dir" task-d "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a draft Gitea pull request succeeded"
+  case "$out" in *"is a draft pull request"*) ;; *) fail "draft Gitea refusal did not name the draft: $out" ;; esac
+  [ ! -e "$state/task-d.check.sh" ] || fail "refused draft Gitea arming left a poll armed"
+
+  # Arming without a login for the origin refuses and names the origin.
+  printf '[]\n' > "$dir/tea/logins.json"
+  write_task_meta "$dir" task-l
+  set +e
+  out=$(run_check_entry "$dir" task-l "$url" 2>&1)
+  rc=$?
+  set -e
+  cp "$dir/tea/logins.saved" "$dir/tea/logins.json"
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded without a login for its origin"
+  case "$out" in *"exactly one tea login whose URL is $origin"*) ;; *) fail "Gitea arming refusal did not name the origin: $out" ;; esac
+  [ ! -e "$state/task-l.check.sh" ] || fail "refused Gitea arming left a poll armed"
+
+  # Arming without tea refuses, because an absent CLI would otherwise poll silently forever.
+  notea="$dir/notea"
+  mkdir -p "$notea"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = tea ] && continue
+      [ -e "$notea/$name" ] || ln -s "$entry" "$notea/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$notea" command -v tea >/dev/null 2>&1 || fail "the tea-free search path still resolved tea"
+  write_task_meta "$dir" task-t
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notea" \
+    "$PR_CHECK" task-t "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with tea absent"
+  case "$out" in *"requires tea on PATH"*) ;; *) fail "Gitea arming with tea absent did not name tea: $out" ;; esac
+  [ ! -e "$state/task-t.check.sh" ] || fail "refused Gitea arming left a poll armed"
+
+  pass "Gitea pull requests are followed through the origin's tea login and never wake falsely"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3441,6 +3609,7 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gitea_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

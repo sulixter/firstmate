@@ -1584,6 +1584,41 @@ test_terminal_passed_with_merged_gitlab_mr_reports_merged() {
   pass "terminal passed run reads merged GitLab MR state"
 }
 
+test_terminal_passed_with_gitea_pr_reads_its_live_state() {
+  reset_fakes
+  local d out url origin
+  origin=http://gitea.example:3000
+  url="$origin/owner/repo/pulls/12"
+  d=$(new_case passed-gitea-pr)
+  make_repo_on_branch "$d/wt" fm/feat-dgitea
+  make_fakebin "$d" >/dev/null
+  fm_fake_tea "$d/fakebin" "$d/tea"
+  fm_fake_tea_fixture "$d/tea" "$origin" 0123456789abcdef0123456789abcdef01234567
+  ln -sf "$(command -v jq)" "$d/fakebin/jq"
+  "$(command -v jq)" -c '.number = 12' "$d/tea/pull.json" > "$d/tea/pull.open.json"
+  "$(command -v jq)" -c '.number = 12' "$d/tea/pull-post.json" > "$d/tea/pull.merged.json"
+  fm_write_meta "$d/state/feat-dgitea.meta" "window=fm:fm-feat-dgitea" \
+    "worktree=$d/wt" "kind=ship" "pr=$url"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dgitea "$url")"
+
+  cp "$d/tea/pull.open.json" "$d/tea/pull.json"
+  out=$(run_crew_state "$d" feat-dgitea)
+  assert_contains "$out" "run passed: PR open" "open Gitea PR state is named"
+  assert_not_contains "$out" "PR merged" "open Gitea PR must not be reported merged"
+  assert_grep 'api --login home --include --method GET /api/v1/repos/owner/repo/pulls/12' "$d/tea/tea.log" \
+    "Gitea PR read uses the origin's login and the parsed repository"
+
+  cp "$d/tea/pull.merged.json" "$d/tea/pull.json"
+  out=$(run_crew_state "$d" feat-dgitea)
+  assert_contains "$out" "run passed: PR merged" "merged Gitea PR is reported merged"
+
+  printf '404\n' > "$d/tea/pull.status"
+  out=$(run_crew_state "$d" feat-dgitea)
+  assert_contains "$out" "run passed: PR state unknown (unreadable)" "an HTTP error is an unknown Gitea PR state"
+  assert_not_contains "$out" "PR merged" "an HTTP error body must not be reported merged"
+  pass "terminal passed run reads a Gitea PR's live state and treats an HTTP error as unknown"
+}
+
 test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   reset_fakes
   local d out
@@ -5553,6 +5588,7 @@ test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
+test_terminal_passed_with_gitea_pr_reads_its_live_state
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
 test_terminal_passed_with_merged_gerrit_change_reports_merged
