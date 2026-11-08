@@ -1,0 +1,47 @@
+## A: red commit status at head (ci/build success, ci/test failure)
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4
+armed: state/task-g4.check.sh
+error: refusing to merge http://127.0.0.1:38931/owner/finance/pulls/4
+  - check 'ci/test' is not green (failure)
+error: these checks are not green: ci/test
+exit=1
+GET pulls/4 -> {"state":"open","merged":false}
+
+## B: protected main requires ci/build + ci/deploy; ci/deploy never reported; ci/test green
+{"rule_name":"main","enable_status_check":true,"status_check_contexts":["ci/build","ci/deploy"]}
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4
+armed: state/task-g4.check.sh
+error: refusing to merge http://127.0.0.1:38931/owner/finance/pulls/4
+  - required check 'ci/deploy' has not reported at head b7e175f590553bda1d18fd4d636d4aa65c92bcd9
+error: these required checks have not reported: ci/deploy
+exit=1
+GET pulls/4 -> {"state":"open","merged":false}
+
+## C: glob required context ci/*
+{"status_check_contexts":["ci/*"]}
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4
+armed: state/task-g4.check.sh
+error: refusing to merge http://127.0.0.1:38931/owner/finance/pulls/4
+  - required check pattern 'ci/*' uses glob syntax this merge path cannot evaluate exactly
+exit=1
+
+## D: argument guards
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 -- --method squash
+error: a Gitea merge accepts only a merge style (--merge, --squash, --rebase, --rebase-merge, or --fast-forward-only) as an extra argument
+exit=2
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 -- --method=squash
+error: a Gitea merge accepts only a merge style (--merge, --squash, --rebase, --rebase-merge, or --fast-forward-only) as an extra argument
+exit=2
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 -- --delete-branch
+error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction
+exit=1
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 -- --squash --merge
+error: a Gitea merge takes at most one merge style
+exit=2
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 --allow-red ci/test
+error: --allow-red does not apply to Gitea, where every reported commit status must be success
+exit=2
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 --allow-missing ci/deploy
+error: --allow-missing does not apply to Gitea, which itself refuses a merge whose required checks have not all succeeded
+exit=2
+GET pulls/4 -> {"state":"open","merged":false}

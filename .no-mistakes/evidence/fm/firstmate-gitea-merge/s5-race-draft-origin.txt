@@ -1,0 +1,54 @@
+## F: stale head - a push lands between verification and the merge request
+$ bin/fm-pr-merge.sh task-g5 http://127.0.0.1:38931/owner/finance/pulls/5
+armed: state/task-g5.check.sh
+verified: http://127.0.0.1:38931/owner/finance/pulls/5 is open and mergeable, with every required check reported and every reported check green at head 5a606ba722cc53877e07a5c0e69f49beb2adcbc5
+error: Gitea did not accept the merge of http://127.0.0.1:38931/owner/finance/pulls/5 (HTTP status 405)
+forge said: Not all required status checks successful
+exit=1
+[shim] pushed a concurrent commit to fm/five before the merge POST
+GET pulls/5 -> {"state":"open","merged":false,"head":"78654c12c7da3579c9748c507ededb47c541a3e7"}
+
+## G: draft pull request (title WIP:)
+$ bin/fm-pr-check.sh task-g6 http://127.0.0.1:38931/owner/finance/pulls/6
+error: http://127.0.0.1:38931/owner/finance/pulls/6 is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate
+exit=1
+sidecar armed? no
+$ bin/fm-pr-merge.sh task-g6 http://127.0.0.1:38931/owner/finance/pulls/6
+armed: state/task-g6.check.sh
+error: refusing to merge http://127.0.0.1:38931/owner/finance/pulls/6
+  - the pull request is a draft, or its draft state is unreadable
+  - mergeable is "false", not true
+  - base branch main requires status checks and none has reported at head b296136fd97432118cf2ae821e76d4c43689821f
+  - required check 'ci/build' has not reported at head b296136fd97432118cf2ae821e76d4c43689821f
+  - required check 'ci/test' has not reported at head b296136fd97432118cf2ae821e76d4c43689821f
+  - required check 'ci/deploy' has not reported at head b296136fd97432118cf2ae821e76d4c43689821f
+error: these required checks have not reported: ci/build, ci/test, ci/deploy
+exit=1
+GET pulls/6 -> {"state":"open","merged":false,"draft":true}
+
+## H: same server, origin spelled http://localhost:38931 - no tea login has that URL
+$ bin/fm-pr-merge.sh task-g7 http://localhost:38931/owner/finance/pulls/7
+error: merging a Gitea pull request requires exactly one tea login whose URL is http://localhost:38931
+exit=1
+pr= recorded in task-g7.meta? 0
+$ bin/fm-pr-check.sh task-g7 http://localhost:38931/owner/finance/pulls/7
+error: watching a Gitea pull request requires exactly one tea login whose URL is http://localhost:38931
+exit=1
+GET pulls/7 -> {"state":"open","merged":false}
+
+## I: non-canonical / unsupported Gitea URL spellings
+$ bin/fm-pr-merge.sh task-g7 http://127.0.0.1:80/owner/finance/pulls/7
+error: invalid PR merge request
+exit=2
+$ bin/fm-pr-merge.sh task-g7 http://127.0.0.1:38931/owner/finance.git/pulls/7
+error: invalid PR merge request
+exit=2
+$ bin/fm-pr-merge.sh task-g7 http://127.0.0.1:38931/owner/finance/pulls/07
+error: invalid PR merge request
+exit=2
+$ bin/fm-pr-merge.sh task-g7 http://owner@127.0.0.1:38931/owner/finance/pulls/7
+error: invalid PR merge request
+exit=2
+$ bin/fm-pr-merge.sh task-g7 http://127.0.0.1:38931/org/sub/finance/pulls/7
+error: invalid PR merge request
+exit=2

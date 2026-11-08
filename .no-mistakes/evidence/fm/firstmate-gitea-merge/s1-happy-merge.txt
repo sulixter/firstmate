@@ -1,0 +1,22 @@
+$ bin/fm-pr-merge.sh task-g1 http://127.0.0.1:38931/owner/finance/pulls/1
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  4 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+armed: state/task-g1.check.sh
+verified: http://127.0.0.1:38931/owner/finance/pulls/1 is open and mergeable, with every required check reported and every reported check green at head a41d2d1dba5ed978e214528d10ee37ea89b54abb
+verified: http://127.0.0.1:38931/owner/finance/pulls/1 is merged
+exit=0
+
+$ live read-back from Gitea REST
+{"number":1,"state":"closed","merged":true,"merge_commit_sha":"ca7da5b4122164e9b48de5efb0d9f8e223d509d3","head":"a41d2d1dba5ed978e214528d10ee37ea89b54abb"}
+$ grep pr= task-g1.meta
+project=/tmp/fm-gitea-lab.ig43bu/clone/r
+pr=http://127.0.0.1:38931/owner/finance/pulls/1
+$ GET branches/fm/one (delete_branch_after_merge=false should keep it)
+200
+$ merge commit parents (repo default_merge_style=merge)
+["8334a378a3efcc3973c82696dac1b12a5bfff868","a41d2d1dba5ed978e214528d10ee37ea89b54abb"]

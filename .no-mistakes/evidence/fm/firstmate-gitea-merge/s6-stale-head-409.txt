@@ -1,0 +1,23 @@
+## F2: stale head on an unprotected base - only head_commit_id can stop the race
+branch protection on main removed
+head before: 78654c12c7da3579c9748c507ededb47c541a3e7
+$ bin/fm-pr-merge.sh task-g5 http://127.0.0.1:38931/owner/finance/pulls/5
+armed: state/task-g5.check.sh
+verified: http://127.0.0.1:38931/owner/finance/pulls/5 is open and mergeable, with every required check reported and every reported check green at head 78654c12c7da3579c9748c507ededb47c541a3e7
+error: Gitea did not accept the merge of http://127.0.0.1:38931/owner/finance/pulls/5 (HTTP status 409)
+forge said: head out of date
+exit=1
+[shim] pushed a concurrent commit to fm/five before the merge POST
+GET pulls/5 -> {"state":"open","merged":false,"head":"a03188f71b6db817a2cf4fa2fd647e0ccfe8cb0c"}
+
+## F3: same pull request, no concurrent push -> merges at the new head
+$ bin/fm-pr-merge.sh task-g5 http://127.0.0.1:38931/owner/finance/pulls/5
+armed: state/task-g5.check.sh
+verified: http://127.0.0.1:38931/owner/finance/pulls/5 is open and mergeable, with every required check reported and every reported check green at head a03188f71b6db817a2cf4fa2fd647e0ccfe8cb0c
+verified: http://127.0.0.1:38931/owner/finance/pulls/5 is merged
+exit=0
+GET pulls/5 -> {"state":"closed","merged":true,"head":"a03188f71b6db817a2cf4fa2fd647e0ccfe8cb0c"}
+
+## crew-state read of a merged/open Gitea PR (fm_pr_gitea_read_record)
+PR 5: MERGED merged=true
+PR 7: OPEN merged=false

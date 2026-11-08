@@ -1,0 +1,20 @@
+$ bin/fm-pr-check.sh task-g3 http://127.0.0.1:38931/owner/finance/pulls/3
+armed: state/task-g3.check.sh
+$ sidecar task-g3.pr-poll
+gitea
+http://127.0.0.1:38931/owner/finance/pulls/3
+http://127.0.0.1:38931
+owner/finance
+3
+$ bin/fm-pr-poll.sh --validated gitea http://127.0.0.1:38931/owner/finance/pulls/3 http://127.0.0.1:38931 owner/finance 3   (open)
+exit=0 output=[]
+$ (merge PR 3 out-of-band via Gitea REST)
+HTTP 200
+$ bin/fm-pr-poll.sh --validated ... 3   (merged)
+exit=0 output=[merged]
+$ bin/fm-pr-poll.sh --validated ... 999 (404 - tea exits 0)
+exit=0 output=[]
+$ bin/fm-pr-poll.sh --validated gitea http://127.0.0.1:38932/... (no tea login for that origin)
+exit=0 output=[]
+$ bin/fm-pr-poll.sh --validated with url/host mismatch
+exit=0 output=[]

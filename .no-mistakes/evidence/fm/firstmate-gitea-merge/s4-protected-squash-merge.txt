@@ -1,0 +1,21 @@
+## E: protected main requires ci/build, ci/test, ci/deploy - all success; merge with --squash
+{"enable_status_check":true,"status_check_contexts":["ci/build","ci/test","ci/deploy"]}
+statuses at head: [{"context":"ci/build","status":"success"},{"context":"ci/test","status":"success"},{"context":"ci/deploy","status":"success"}]
+$ bin/fm-pr-merge.sh task-g4 http://127.0.0.1:38931/owner/finance/pulls/4 -- --squash
+armed: state/task-g4.check.sh
+verified: http://127.0.0.1:38931/owner/finance/pulls/4 is open and mergeable, with every required check reported and every reported check green at head b7e175f590553bda1d18fd4d636d4aa65c92bcd9
+verified: http://127.0.0.1:38931/owner/finance/pulls/4 is merged
+exit=0
+GET pulls/4 -> {"state":"closed","merged":true,"merge_commit_sha":"372e49c96c9b9348c76ecaaa066d02a167c7f386"}
+merge commit parents (squash => 1): ["0680d858eb0231546f10c8c2eaecb8cac0d86f4f"]
+branch fm/four still exists: HTTP 200
+merge-authority record:
+fm-merge-authority-v1
+gitea
+http://127.0.0.1:38931
+owner/finance
+4
+attended
+wake queue:
+1794153737	1	check	merged-task-g1-http://127.0.0.1:38931/owner/finance/pulls/1	check: merge landed: task-g1 http://127.0.0.1:38931/owner/finance/pulls/1
+1794153881	2	check	merged-task-g4-http://127.0.0.1:38931/owner/finance/pulls/4	check: merge landed: task-g4 http://127.0.0.1:38931/owner/finance/pulls/4
